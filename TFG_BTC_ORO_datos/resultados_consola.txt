@@ -1,0 +1,269 @@
+> # ==============================================================================
+> # SCRIPT TFG: BITCOIN VS ORO COMO ACTIVO REFUGIO
+> # ==============================================================================
+> # Autor: [Javier Lara]
+> # Fecha de extracción de datos: Enero 2018 - Febrero 2026
+> # Descripción: Análisis econométrico para evaluar la condición de activo 
+> # refugio del Bitcoin y el Oro frente a caídas extremas del mercado.
+> # ==============================================================================
+> 
+> # ------------------------------------------------------------------------------
+> # 1. LIBRERÍAS Y DESCARGA DE DATOS
+> # ------------------------------------------------------------------------------
+> library(quantmod)
+> library(PerformanceAnalytics)
+> library(rugarch)
+> library(lmtest)
+> library(sandwich)
+> library(tseries)
+> library(zoo)
+> 
+> # Descarga de series temporales (Yahoo Finance)
+> getSymbols(c("BTC-USD", "GLD", "^GSPC", "^VIX"), from = "2018-01-01", to = "2026-02-24")
+[1] "BTC-USD" "GLD"     "GSPC"    "VIX"    
+> 
+> # Alineación de fechas (elimina fines de semana del BTC para cuadrar con bolsa)
+> datos_precios <- na.omit(merge(Ad(`BTC-USD`), Ad(GLD), Ad(GSPC), Cl(VIX)))
+> colnames(datos_precios) <- c("Precio_BTC", "Precio_ORO", "Precio_SP500", "Nivel_VIX")
+> 
+> # Cálculo de rendimientos logarítmicos
+> rendimientos_temp <- na.omit(CalculateReturns(datos_precios[, 1:3], method = "log"))
+> base_datos_final <- na.omit(merge(rendimientos_temp, datos_precios$Nivel_VIX))
+> colnames(base_datos_final) <- c("BTC", "ORO", "SP500", "VIX")
+> 
+> cat("\n--- Días hábiles totales analizados:", nrow(base_datos_final), "---\n")
+
+--- Días hábiles totales analizados: 2045 ---
+> 
+> # ------------------------------------------------------------------------------
+> # 2. ESTADÍSTICOS DESCRIPTIVOS Y TESTS DE ESTACIONARIEDAD
+> # ------------------------------------------------------------------------------
+> cat("\n=== ESTADÍSTICOS DESCRIPTIVOS ===\n")
+
+=== ESTADÍSTICOS DESCRIPTIVOS ===
+> # Bitcoin
+> cat("BTC -> Media:", mean(base_datos_final$BTC), "| Desv.Est:", sd(base_datos_final$BTC), 
++     "| Asim:", skewness(base_datos_final$BTC, method="moment"), 
++     "| Curtosis:", kurtosis(base_datos_final$BTC, method="moment") + 3, "\n")
+BTC -> Media: 0.0007147273 | Desv.Est: 0.04126328 | Asim: -0.9137359 | Curtosis: 17.33141 
+> # Oro
+> cat("ORO -> Media:", mean(base_datos_final$ORO), "| Desv.Est:", sd(base_datos_final$ORO), 
++     "| Asim:", skewness(base_datos_final$ORO, method="moment"), 
++     "| Curtosis:", kurtosis(base_datos_final$ORO, method="moment") + 3, "\n")
+ORO -> Media: 0.0006586485 | Desv.Est: 0.01020425 | Asim: -0.7925585 | Curtosis: 15.55791 
+> 
+> cat("\n=== TEST DE DICKEY-FULLER AUMENTADO (Estacionariedad) ===\n")
+
+=== TEST DE DICKEY-FULLER AUMENTADO (Estacionariedad) ===
+> print(adf.test(base_datos_final$BTC))
+
+	Augmented Dickey-Fuller Test
+
+data:  base_datos_final$BTC
+Dickey-Fuller = -11.737, Lag order = 12, p-value = 0.01
+alternative hypothesis: stationary
+
+Aviso:
+In adf.test(base_datos_final$BTC) : p-value smaller than printed p-value
+> print(adf.test(base_datos_final$ORO))
+
+	Augmented Dickey-Fuller Test
+
+data:  base_datos_final$ORO
+Dickey-Fuller = -12.505, Lag order = 12, p-value = 0.01
+alternative hypothesis: stationary
+
+Aviso:
+In adf.test(base_datos_final$ORO) : p-value smaller than printed p-value
+> 
+> cat("\n=== TEST DE LJUNG-BOX (Autocorrelación / Efectos ARCH) ===\n")
+
+=== TEST DE LJUNG-BOX (Autocorrelación / Efectos ARCH) ===
+> print(Box.test(base_datos_final$BTC^2, type = "Ljung-Box", lag = 10))
+
+	Box-Ljung test
+
+data:  base_datos_final$BTC^2
+X-squared = 57.716, df = 10, p-value = 9.776e-09
+
+> print(Box.test(base_datos_final$ORO^2, type = "Ljung-Box", lag = 10))
+
+	Box-Ljung test
+
+data:  base_datos_final$ORO^2
+X-squared = 408.38, df = 10, p-value < 2.2e-16
+
+> 
+> # ------------------------------------------------------------------------------
+> # 3. RIESGO: MAXIMUM DRAWDOWN Y RATIO DE SHARPE
+> # ------------------------------------------------------------------------------
+> cat("\n=== RIESGO Y DESEMPEÑO ===\n")
+
+=== RIESGO Y DESEMPEÑO ===
+> cat("Maximum Drawdown (SP500, BTC, ORO):", 
++     round(maxDrawdown(base_datos_final$SP500)*100, 2), "%,",
++     round(maxDrawdown(base_datos_final$BTC)*100, 2), "%,",
++     round(maxDrawdown(base_datos_final$ORO)*100, 2), "%\n")
+Maximum Drawdown (SP500, BTC, ORO): 36.1 %, 86.43 %, 23.89 %
+> 
+> cat("Sharpe Ratio Anualizado (SP500, BTC, ORO):", 
++     round(SharpeRatio.annualized(base_datos_final$SP500, Rf=0), 4), ",",
++     round(SharpeRatio.annualized(base_datos_final$BTC, Rf=0), 4), ",",
++     round(SharpeRatio.annualized(base_datos_final$ORO, Rf=0), 4), "\n")
+Sharpe Ratio Anualizado (SP500, BTC, ORO): 0.5124 , -0.0643 , 1.0188 
+> 
+> # ------------------------------------------------------------------------------
+> # 4. VOLATILIDAD CONDICIONAL: MODELO GARCH(1,1)
+> # ------------------------------------------------------------------------------
+> especificacion_garch <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
++                                    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
++                                    distribution.model = "norm")
+> 
+> ajuste_garch_btc <- ugarchfit(spec = especificacion_garch, data = base_datos_final$BTC)
+> ajuste_garch_oro <- ugarchfit(spec = especificacion_garch, data = base_datos_final$ORO)
+> 
+> cat("\n=== COEFICIENTES GARCH (1,1) ===\n")
+
+=== COEFICIENTES GARCH (1,1) ===
+> cat("BTC:\n"); print(coef(ajuste_garch_btc))
+BTC:
+          mu        omega       alpha1        beta1 
+0.0011858622 0.0001350698 0.1307829415 0.7996712798 
+> cat("ORO:\n"); print(coef(ajuste_garch_oro))
+ORO:
+          mu        omega       alpha1        beta1 
+3.047287e-04 3.855946e-06 1.107642e-01 8.547391e-01 
+> 
+> # ------------------------------------------------------------------------------
+> # 5. CONTRASTE OLS Y ERRORES ROBUSTOS HAC (S&P 500 y VIX)
+> # ------------------------------------------------------------------------------
+> # 5.1 Umbrales y Dummies (S&P 500 al 5% y VIX al 95%)
+> q5 <- quantile(base_datos_final$SP500, 0.05)
+> D5 <- ifelse(base_datos_final$SP500 <= q5, 1, 0)
+> interaccion_5_pura <- D5 * base_datos_final$SP500
+> 
+> q95_vix <- quantile(base_datos_final$VIX, 0.95)
+> D_vix <- ifelse(base_datos_final$VIX >= q95_vix, 1, 0)
+> interaccion_vix_pura <- D_vix * base_datos_final$SP500
+> 
+> # 5.2 Modelos de Regresión
+> mod_btc_5 <- lm(base_datos_final$BTC ~ base_datos_final$SP500 + interaccion_5_pura)
+> mod_oro_5 <- lm(base_datos_final$ORO ~ base_datos_final$SP500 + interaccion_5_pura)
+> 
+> mod_btc_vix <- lm(base_datos_final$BTC ~ base_datos_final$SP500 + interaccion_vix_pura)
+> mod_oro_vix <- lm(base_datos_final$ORO ~ base_datos_final$SP500 + interaccion_vix_pura)
+> 
+> # 5.3 Test de Heterocedasticidad (Breusch-Pagan)
+> cat("\n=== TEST DE BREUSCH-PAGAN ===\n")
+
+=== TEST DE BREUSCH-PAGAN ===
+> print(bptest(mod_btc_5)); print(bptest(mod_oro_5))
+
+	studentized Breusch-Pagan test
+
+data:  mod_btc_5
+BP = 166.09, df = 2, p-value < 2.2e-16
+
+
+	studentized Breusch-Pagan test
+
+data:  mod_oro_5
+BP = 10.64, df = 2, p-value = 0.004894
+
+> 
+> # 5.4 Resultados con Errores Robustos Newey-West (HAC) y Test de Wald
+> cat("\n=== MODELOS OLS (S&P 500 al 5%) CON HAC ===\n")
+
+=== MODELOS OLS (S&P 500 al 5%) CON HAC ===
+> print(coeftest(mod_btc_5, vcov = vcovHAC)); print(waldtest(mod_btc_5, vcov = vcovHAC))
+
+t test of coefficients:
+
+                         Estimate Std. Error t value Pr(>|t|)    
+(Intercept)            0.00116257 0.00088941  1.3071  0.19132    
+base_datos_final$SP500 0.79772495 0.08628584  9.2451  < 2e-16 ***
+interaccion_5_pura     0.53161438 0.32239081  1.6490  0.09931 .  
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Wald test
+
+Model 1: base_datos_final$BTC ~ base_datos_final$SP500 + interaccion_5_pura
+Model 2: base_datos_final$BTC ~ 1
+  Res.Df Df     F    Pr(>F)    
+1   2042                       
+2   2044 -2 49.31 < 2.2e-16 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+> print(coeftest(mod_oro_5, vcov = vcovHAC)); print(waldtest(mod_oro_5, vcov = vcovHAC))
+
+t test of coefficients:
+
+                          Estimate  Std. Error t value Pr(>|t|)   
+(Intercept)             0.00058281  0.00022125  2.6342 0.008498 **
+base_datos_final$SP500  0.08625618  0.04161519  2.0727 0.038325 * 
+interaccion_5_pura     -0.02397795  0.07844042 -0.3057 0.759877   
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Wald test
+
+Model 1: base_datos_final$ORO ~ base_datos_final$SP500 + interaccion_5_pura
+Model 2: base_datos_final$ORO ~ 1
+  Res.Df Df      F   Pr(>F)   
+1   2042                      
+2   2044 -2 5.5952 0.003773 **
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+> 
+> cat("\n=== MODELOS OLS (VIX al 95%) CON HAC ===\n")
+
+=== MODELOS OLS (VIX al 95%) CON HAC ===
+> print(coeftest(mod_btc_vix, vcov = vcovHAC))
+
+t test of coefficients:
+
+                         Estimate Std. Error t value Pr(>|t|)    
+(Intercept)            0.00041035 0.00084917  0.4832   0.6290    
+base_datos_final$SP500 0.89348675 0.10406904  8.5855   <2e-16 ***
+interaccion_vix_pura   0.26612183 0.31869600  0.8350   0.4038    
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+> print(coeftest(mod_oro_vix, vcov = vcovHAC))
+
+t test of coefficients:
+
+                         Estimate Std. Error t value Pr(>|t|)   
+(Intercept)            0.00064313 0.00021946  2.9305 0.003422 **
+base_datos_final$SP500 0.06254018 0.02818085  2.2192 0.026580 * 
+interaccion_vix_pura   0.03368475 0.04654927  0.7236 0.469372   
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+> 
+> # ------------------------------------------------------------------------------
+> # 6. ANÁLISIS ESTRUCTURAL POR SUBPERIODOS
+> # ------------------------------------------------------------------------------
+> fechas <- index(base_datos_final)
+> fase1 <- fechas >= as.Date("2018-01-01") & fechas <= as.Date("2020-02-28")
+> fase2 <- fechas >= as.Date("2020-03-01") & fechas <= as.Date("2022-12-31")
+> fase3 <- fechas >= as.Date("2023-01-01") & fechas <= as.Date("2026-12-31")
+> 
+> cat("\n=== CORRELACIONES S&P 500 POR SUBPERIODOS ===\n")
+
+=== CORRELACIONES S&P 500 POR SUBPERIODOS ===
+> cat("BTC Fase 1 (Pre-COVID):", cor(base_datos_final$BTC[fase1], base_datos_final$SP500[fase1]), "\n")
+BTC Fase 1 (Pre-COVID): 0.01137981 
+> cat("BTC Fase 2 (Pandemia): ", cor(base_datos_final$BTC[fase2], base_datos_final$SP500[fase2]), "\n")
+BTC Fase 2 (Pandemia):  0.4268821 
+> cat("BTC Fase 3 (ETFs):     ", cor(base_datos_final$BTC[fase3], base_datos_final$SP500[fase3]), "\n")
+BTC Fase 3 (ETFs):      0.3218717 
+> 
+> cat("\nORO Fase 1 (Pre-COVID):", cor(base_datos_final$ORO[fase1], base_datos_final$SP500[fase1]), "\n")
+
+ORO Fase 1 (Pre-COVID): -0.1293729 
+> cat("ORO Fase 2 (Pandemia): ", cor(base_datos_final$ORO[fase2], base_datos_final$SP500[fase2]), "\n")
+ORO Fase 2 (Pandemia):  0.17845 
+> cat("ORO Fase 3 (ETFs):     ", cor(base_datos_final$ORO[fase3], base_datos_final$SP500[fase3]), "\n")
+ORO Fase 3 (ETFs):      0.07770935 
