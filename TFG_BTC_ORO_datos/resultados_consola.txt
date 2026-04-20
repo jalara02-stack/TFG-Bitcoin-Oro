@@ -1,65 +1,273 @@
 > # ==============================================================================
-> # TRABAJO DE FIN DE GRADO
-> # Bitcoin como Activo Refugio: Comparación con el Oro
+> # TFG ECONOMÍA — Bitcoin y Oro como Activos Refugio
 > # Autor: Javier Lara
 > # Periodo de análisis: 01/01/2018 - 28/02/2026
 > # Lenguaje: R
 > # ==============================================================================
-> 
-> # ------------------------------------------------------------------------------
-> # 1. LIBRERÍAS
-> # ------------------------------------------------------------------------------
-> # Instalar si no están disponibles:
-> install.packages(c("quantmod","xts","zoo","dplyr","lmtest","sandwich",
-+                     "tseries","ggplot2","scales","patchwork","tidyr"))
+> # ESTRUCTURA DEL SCRIPT
+> # 0. Paquetes y preparación
+> # 1. Funciones auxiliares
+> # 2. Descarga y preparación de datos
+> # 3. Tasa libre de riesgo
+> # 4. Tabla 1 — Estadísticos descriptivos y Ratio de Sharpe
+> # 5. Tabla 2 — Test ADF
+> # 6. Tabla 3 — Tests Ljung-Box y ARCH-LM
+> # 7. Tabla 4 — Correlaciones por subperiodo y correlación móvil
+> # 8. Tabla 5 — Modelo principal con dummies (periodo completo)
+> # 9. Tabla 6 — Robustez con VIX
+> # 10. Tablas 7a y 7b — Subperiodos
+> # 11. Figuras 1 a 4
 > # ==============================================================================
-> # TRABAJO DE FIN DE GRADO
-> # Bitcoin como Activo Refugio: Comparación con el Oro
-> # Autor: Javier Lara
-> # Periodo de análisis: 01/01/2018 - 28/02/2026
-> # Lenguaje: R
-> # ==============================================================================
 > 
 > # ------------------------------------------------------------------------------
-> # 1. LIBRERÍAS
+> # 0. PAQUETES Y PREPARACIÓN
 > # ------------------------------------------------------------------------------
-> # Instalar si no están disponibles:
-> #install.packages(c("quantmod","xts","zoo","dplyr","lmtest","sandwich",
->  #                   "tseries","ggplot2","scales","patchwork","tidyr"))
 > 
-> library(quantmod)      # Descarga de datos financieros de Yahoo Finance
-> library(xts)           # Series temporales
-> library(zoo)           # Funciones de ventanas móviles
-> library(dplyr)         # Manipulación de datos
-> library(lmtest)        # Tests de hipótesis sobre modelos de regresión
-> library(sandwich)      # Estimador de Newey-West
-> library(tseries)       # Test ADF y Ljung-Box
-> library(ggplot2)       # Gráficos
-> library(scales)        # Formato de ejes en ggplot2
-> library(patchwork)     # Combinación de gráficos
-> library(tidyr)         # Transformación de datos
+> # Instalar si faltan:
+> # install.packages(c(
+> #   "quantmod", "xts", "zoo", "dplyr", "tidyr", "lmtest", "sandwich",
+> #   "tseries", "ggplot2", "scales", "FinTS"
+> # ))
+> 
+> suppressPackageStartupMessages({
++   library(quantmod)
++   library(xts)
++   library(zoo)
++   library(dplyr)
++   library(tidyr)
++   library(lmtest)
++   library(sandwich)
++   library(tseries)
++   library(ggplot2)
++   library(scales)
++   library(FinTS)
++ })
+Hubo 11 avisos (use warnings() para verlos)
+> 
+> options(scipen = 999)
+> 
+> dir.create("salidas", showWarnings = FALSE)
+> dir.create("figuras", showWarnings = FALSE)
+> 
+> # ------------------------------------------------------------------------------
+> # 1. FUNCIONES AUXILIARES
+> # ------------------------------------------------------------------------------
+> 
+> sig_stars <- function(p) {
++   dplyr::case_when(
++     is.na(p)      ~ NA_character_,
++     p < 0.01      ~ "***",
++     p < 0.05      ~ "**",
++     p < 0.10      ~ "*",
++     TRUE          ~ "n.s."
++   )
++ }
+> 
+> fmt_p <- function(p, digits = 4) {
++   ifelse(
++     is.na(p),
++     NA_character_,
++     ifelse(
++       p < 0.0001,
++       "<0.0001",
++       format(round(p, digits), nsmall = digits, scientific = FALSE, trim = TRUE)
++     )
++   )
++ }
+> 
+> clasificar_activo <- function(beta_crisis, p_beta_crisis_bi, tol = 1e-12) {
++   if (is.na(beta_crisis) || is.na(p_beta_crisis_bi)) return("Sin evidencia")
++   
++   if (beta_crisis < -tol && p_beta_crisis_bi < 0.05) {
++     return("Refugio fuerte")
++   } else if (beta_crisis <= tol && p_beta_crisis_bi >= 0.05) {
++     return("Refugio débil")
++   } else if (beta_crisis > tol && p_beta_crisis_bi < 0.05) {
++     return("Procíclico")
++   } else {
++     return("Sin evidencia")
++   }
++ }
+> 
+> estimar_dummy <- function(activo, indice, umbral_pct,
++                           nombre_activo, nombre_indice,
++                           datos_uso) {
++   
++   r_a <- as.numeric(datos_uso[, activo])
++   r_m <- as.numeric(datos_uso[, indice])
++   
++   n <- length(r_a)
++   if (n < 30) stop("Muestra demasiado pequeña para estimar el modelo.")
++   
++   umbral <- as.numeric(quantile(r_m, probs = umbral_pct, na.rm = TRUE))
++   D_t <- as.numeric(r_m <= umbral)
++   inter <- D_t * r_m
++   
++   df_mod <- data.frame(r_a = r_a, r_m = r_m, inter = inter)
++   mod <- lm(r_a ~ r_m + inter, data = df_mod)
++   
++   k <- length(coef(mod))
++   df_res <- n - k
++   lag_nw <- max(floor(4 * (n / 100)^(2/9)), 1)
++   
++   V <- tryCatch(
++     NeweyWest(mod, lag = lag_nw, prewhite = FALSE),
++     error = function(e) vcov(mod)
++   )
++   
++   b <- coef(mod)
++   b0 <- unname(b[1])
++   b1 <- unname(b[2])
++   b2 <- unname(b[3])
++   
++   se0 <- sqrt(V[1, 1])
++   se1 <- sqrt(V[2, 2])
++   se2 <- sqrt(V[3, 3])
++   
++   t0 <- b0 / se0
++   t1 <- b1 / se1
++   t2 <- b2 / se2
++   
++   p0_bi <- 2 * pt(abs(t0), df = df_res, lower.tail = FALSE)
++   p1_bi <- 2 * pt(abs(t1), df = df_res, lower.tail = FALSE)
++   p2_bi <- 2 * pt(abs(t2), df = df_res, lower.tail = FALSE)
++   
++   beta_crisis <- b1 + b2
++   
++   var_beta_crisis <- V[2, 2] + V[3, 3] + 2 * V[2, 3]
++   if (var_beta_crisis < 0 && abs(var_beta_crisis) < 1e-12) {
++     var_beta_crisis <- 0
++   }
++   
++   se_beta_crisis <- sqrt(var_beta_crisis)
++   t_beta_crisis <- beta_crisis / se_beta_crisis
++   
++   p_beta_crisis_bi <- 2 * pt(abs(t_beta_crisis), df = df_res, lower.tail = FALSE)
++   
++   clasificacion <- clasificar_activo(beta_crisis, p_beta_crisis_bi)
++   
++   data.frame(
++     Activo = nombre_activo,
++     Indice = nombre_indice,
++     Umbral = paste0(umbral_pct * 100, "%"),
++     N_crisis = sum(D_t),
++     
++     Beta0 = b0,
++     p_Beta0_bi = p0_bi,
++     
++     Beta1 = b1,
++     p_Beta1_bi = p1_bi,
++     Sig_Beta1 = sig_stars(p1_bi),
++     
++     Beta2 = b2,
++     p_Beta2_bi = p2_bi,
++     Sig_Beta2 = sig_stars(p2_bi),
++     
++     Beta_crisis = beta_crisis,
++     SE_Beta_crisis = se_beta_crisis,
++     p_Beta_crisis_bi = p_beta_crisis_bi,
++     Sig_Beta_crisis = sig_stars(p_beta_crisis_bi),
++     
++     Clasificacion = clasificacion,
++     stringsAsFactors = FALSE
++   )
++ }
+> 
+> estimar_vix <- function(activo, nombre_activo, datos_uso) {
++   
++   r_a <- as.numeric(datos_uso[, activo])
++   r_m <- as.numeric(datos_uso[, "SP500"])
++   D_t <- as.numeric(datos_uso[, "DUMMY_VIX"])
++   
++   n <- length(r_a)
++   inter <- D_t * r_m
++   
++   df_mod <- data.frame(r_a = r_a, r_m = r_m, inter = inter)
++   mod <- lm(r_a ~ r_m + inter, data = df_mod)
++   
++   k <- length(coef(mod))
++   df_res <- n - k
++   lag_nw <- max(floor(4 * (n / 100)^(2/9)), 1)
++   
++   V <- tryCatch(
++     NeweyWest(mod, lag = lag_nw, prewhite = FALSE),
++     error = function(e) vcov(mod)
++   )
++   
++   b <- coef(mod)
++   b1 <- unname(b[2])
++   b2 <- unname(b[3])
++   
++   se1 <- sqrt(V[2, 2])
++   se2 <- sqrt(V[3, 3])
++   
++   t1 <- b1 / se1
++   t2 <- b2 / se2
++   
++   p1_bi <- 2 * pt(abs(t1), df = df_res, lower.tail = FALSE)
++   p2_bi <- 2 * pt(abs(t2), df = df_res, lower.tail = FALSE)
++   
++   beta_crisis <- b1 + b2
++   var_beta_crisis <- V[2, 2] + V[3, 3] + 2 * V[2, 3]
++   if (var_beta_crisis < 0 && abs(var_beta_crisis) < 1e-12) {
++     var_beta_crisis <- 0
++   }
++   se_beta_crisis <- sqrt(var_beta_crisis)
++   t_beta_crisis <- beta_crisis / se_beta_crisis
++   p_beta_crisis_bi <- 2 * pt(abs(t_beta_crisis), df = df_res, lower.tail = FALSE)
++   
++   clasificacion <- clasificar_activo(beta_crisis, p_beta_crisis_bi)
++   
++   data.frame(
++     Activo = nombre_activo,
++     N_crisis = sum(D_t),
++     
++     Beta1 = b1,
++     p_Beta1_bi = p1_bi,
++     Sig_Beta1 = sig_stars(p1_bi),
++     
++     Beta2 = b2,
++     p_Beta2_bi = p2_bi,
++     Sig_Beta2 = sig_stars(p2_bi),
++     
++     Beta_crisis = beta_crisis,
++     SE_Beta_crisis = se_beta_crisis,
++     p_Beta_crisis_bi = p_beta_crisis_bi,
++     Sig_Beta_crisis = sig_stars(p_beta_crisis_bi),
++     
++     Clasificacion = clasificacion,
++     stringsAsFactors = FALSE
++   )
++ }
+> 
+> calcular_cor_movil <- function(activo, indice, ventana, datos_uso) {
++   rollapply(
++     datos_uso[, c(activo, indice)],
++     width = ventana,
++     FUN = function(x) cor(x[, 1], x[, 2]),
++     by.column = FALSE,
++     align = "right"
++   )
++ }
 > 
 > # ------------------------------------------------------------------------------
 > # 2. DESCARGA Y PREPARACIÓN DE DATOS
 > # ------------------------------------------------------------------------------
-> # Fuente: Yahoo Finance
-> # Periodo: 01/01/2018 - 28/02/2026
-> # Activos: Bitcoin (BTC-USD), Oro físico ETF (GLD), S&P 500 (^GSPC),
-> #          Eurostoxx 50 (^STOXX50E), Nikkei 225 (^N225),
-> #          T-Bill 3 meses (^IRX), VIX (^VIX)
 > 
-> getSymbols(c("BTC-USD", "GLD", "^GSPC", "^STOXX50E", "^N225", "^IRX", "^VIX"),
-+            from = "2018-01-01",
-+            to   = "2026-02-28",
-+            src  = "yahoo",
-+            auto.assign = TRUE)
+> getSymbols(
++   c("BTC-USD", "GLD", "^GSPC", "^STOXX50E", "^N225", "^IRX", "^VIX"),
++   from = "2018-01-01",
++   to   = "2026-02-28",
++   src  = "yahoo",
++   auto.assign = TRUE
++ )
 [1] "BTC-USD"  "GLD"      "GSPC"     "STOXX50E" "N225"     "IRX"      "VIX"     
 Avisos:
 1: ^N225 contains missing values. Some functions will not work if objects contain missing values in the middle of the series. Consider using na.omit(), na.approx(), na.fill(), etc to remove or replace them. 
 2: ^IRX contains missing values. Some functions will not work if objects contain missing values in the middle of the series. Consider using na.omit(), na.approx(), na.fill(), etc to remove or replace them. 
 3: ^VIX contains missing values. Some functions will not work if objects contain missing values in the middle of the series. Consider using na.omit(), na.approx(), na.fill(), etc to remove or replace them. 
 > 
-> # Extraemos precios de cierre ajustados
+> # Precios de cierre ajustados y cierres
 > btc_raw  <- Ad(`BTC-USD`)
 > gld_raw  <- Ad(GLD)
 > sp_raw   <- Ad(GSPC)
@@ -68,117 +276,128 @@ Avisos:
 > irx_raw  <- Cl(IRX)
 > vix_raw  <- Cl(VIX)
 > 
-> # Calculamos rendimientos logarítmicos diarios: r_t = ln(P_t / P_{t-1})
-> btc_ret  <- diff(log(btc_raw),  lag = 1)
-> gld_ret  <- diff(log(gld_raw),  lag = 1)
-> sp_ret   <- diff(log(sp_raw),   lag = 1)
+> # Rendimientos logarítmicos diarios
+> btc_ret  <- diff(log(btc_raw), lag = 1)
+> gld_ret  <- diff(log(gld_raw), lag = 1)
+> sp_ret   <- diff(log(sp_raw), lag = 1)
 > euro_ret <- diff(log(euro_raw), lag = 1)
-> nik_ret  <- diff(log(nik_raw),  lag = 1)
+> nik_ret  <- diff(log(nik_raw), lag = 1)
 > 
-> # Fusionamos todas las series en un único objeto xts
-> # La fusión elimina automáticamente los días en que alguna serie no tiene dato
-> # (fines de semana, festivos occidentales y japoneses)
-> datos_raw <- merge(btc_ret, gld_ret, sp_ret, euro_ret, nik_ret,
-+                    irx_raw, vix_raw,
-+                    join = "inner")
-Aviso:
-In merge.xts(btc_ret, gld_ret, sp_ret, euro_ret, nik_ret, irx_raw,  :
-  'join' only applicable to two object merges
+> # Homogeneización estricta por intersección de fechas
+> lista_series <- list(
++   btc_ret, gld_ret, sp_ret, euro_ret, nik_ret, irx_raw, vix_raw
++ )
 > 
-> colnames(datos_raw) <- c("BTC", "ORO", "SP500", "EURO", "NIKKEI",
-+                          "IRX", "VIX")
+> datos_raw <- Reduce(function(x, y) merge(x, y, join = "inner"), lista_series)
+> colnames(datos_raw) <- c("BTC", "ORO", "SP500", "EURO", "NIKKEI", "IRX", "VIX")
 > 
-> # Eliminamos NAs residuales
 > datos <- na.omit(datos_raw)
 > 
-> cat("Observaciones totales tras homogeneización:", nrow(datos), "\n")
-Observaciones totales tras homogeneización: 1865 
-> cat("Periodo:", as.character(index(datos)[1]),
-+     "a", as.character(index(datos)[nrow(datos)]), "\n")
+> cat("Observaciones totales:", nrow(datos), "\n")
+Observaciones totales: 1865 
+> cat("Periodo:", as.character(index(datos)[1]), "a", as.character(index(datos)[nrow(datos)]), "\n")
 Periodo: 2018-01-05 a 2026-02-27 
 > 
 > # ------------------------------------------------------------------------------
 > # 3. TASA LIBRE DE RIESGO
 > # ------------------------------------------------------------------------------
-> # Se emplea el T-Bill a 3 meses (^IRX) como tasa libre de riesgo anual.
-> # Se convierte a rendimiento diario para el cálculo del Ratio de Sharpe.
 > 
-> tasa_rf_anual <- mean(as.numeric(datos[, "IRX"]), na.rm = TRUE) / 100
+> tasa_rf_anual  <- mean(as.numeric(datos[, "IRX"]), na.rm = TRUE) / 100
 > tasa_rf_diaria <- tasa_rf_anual / 252
 > 
-> cat("Tasa libre de riesgo anual media (T-Bill 3m):",
-+     round(tasa_rf_anual * 100, 4), "%\n")
-Tasa libre de riesgo anual media (T-Bill 3m): 2.5695 %
-> cat("Tasa libre de riesgo diaria equivalente:",
-+     round(tasa_rf_diaria * 100, 6), "%\n")
-Tasa libre de riesgo diaria equivalente: 0.010197 %
+> cat("Tasa libre de riesgo anual media:", round(tasa_rf_anual * 100, 4), "%\n")
+Tasa libre de riesgo anual media: 2.5695 %
+> cat("Tasa libre de riesgo diaria:", round(tasa_rf_diaria * 100, 6), "%\n")
+Tasa libre de riesgo diaria: 0.010197 %
 > 
 > # ------------------------------------------------------------------------------
-> # 4. ESTADÍSTICOS DESCRIPTIVOS Y RATIO DE SHARPE — TABLA 1
+> # 4. TABLA 1 — ESTADÍSTICOS DESCRIPTIVOS Y RATIO DE SHARPE
 > # ------------------------------------------------------------------------------
 > 
 > activos_desc <- c("BTC", "ORO", "SP500")
-> nombres_desc <- c("Bitcoin", "Oro (GLD)", "S&P 500")
+> nombres_desc <- c("Bitcoin", "Oro", "S&P 500")
 > 
-> tabla_descriptivos <- data.frame()
+> tabla1_completa <- data.frame()
 > 
-> for (i in 1:length(activos_desc)) {
+> for (i in seq_along(activos_desc)) {
 +   serie <- as.numeric(datos[, activos_desc[i]])
-+   n     <- length(serie)
 +   media <- mean(serie, na.rm = TRUE)
 +   desv  <- sd(serie, na.rm = TRUE)
 +   asim  <- mean((serie - media)^3, na.rm = TRUE) / desv^3
 +   kurt_exc <- mean((serie - media)^4, na.rm = TRUE) / desv^4 - 3
 +   volat_anual <- desv * sqrt(252) * 100
-+   sharpe <- (mean(serie, na.rm = TRUE) - tasa_rf_diaria) /
-+     sd(serie, na.rm = TRUE) * sqrt(252)
++   sharpe <- (media - tasa_rf_diaria) / desv * sqrt(252)
 +   
-+   tabla_descriptivos <- rbind(tabla_descriptivos, data.frame(
-+     Activo       = nombres_desc[i],
-+     Media_diaria = round(media, 6),
-+     Desv_Est     = round(desv, 6),
-+     Asimetria    = round(asim, 4),
-+     Curtosis_exc = round(kurt_exc, 4),
-+     Volat_anual_pct = round(volat_anual, 2),
-+     Sharpe_anual = round(sharpe, 4)
-+   ))
++   tabla1_completa <- rbind(
++     tabla1_completa,
++     data.frame(
++       Activo = nombres_desc[i],
++       Media_diaria = media,
++       Desv_Est = desv,
++       Asimetria = asim,
++       Curtosis = kurt_exc,
++       Volat_anual_pct = volat_anual,
++       Sharpe_anual = sharpe,
++       stringsAsFactors = FALSE
++     )
++   )
 + }
+> 
+> tabla1_completa <- tabla1_completa %>%
++   mutate(
++     Media_diaria = round(Media_diaria, 6),
++     Desv_Est = round(Desv_Est, 6),
++     Asimetria = round(Asimetria, 4),
++     Curtosis = round(Curtosis, 4),
++     Volat_anual_pct = round(Volat_anual_pct, 2),
++     Sharpe_anual = round(Sharpe_anual, 4)
++   )
+> 
+> tabla1_cuerpo <- tabla1_completa %>%
++   mutate(
++     Media_diaria = ifelse(Activo == "S&P 500", "-", sprintf("%.6f", Media_diaria)),
++     Desv_Est = ifelse(Activo == "S&P 500", "-", sprintf("%.6f", Desv_Est)),
++     Asimetria = ifelse(Activo == "S&P 500", "-", sprintf("%.4f", Asimetria)),
++     Curtosis = ifelse(Activo == "S&P 500", "-", sprintf("%.4f", Curtosis)),
++     Volat_anual_pct = ifelse(Activo == "S&P 500", "-", paste0(sprintf("%.2f", Volat_anual_pct), "%")),
++     Sharpe_anual = sprintf("%.4f", Sharpe_anual)
++   )
 > 
 > cat("\n--- TABLA 1: ESTADÍSTICOS DESCRIPTIVOS Y RATIO DE SHARPE ---\n")
 
 --- TABLA 1: ESTADÍSTICOS DESCRIPTIVOS Y RATIO DE SHARPE ---
-> print(tabla_descriptivos, row.names = FALSE)
-    Activo Media_diaria Desv_Est Asimetria Curtosis_exc Volat_anual_pct Sharpe_anual
-   Bitcoin     0.000311 0.037810   -1.1116      14.6833           60.02       0.0876
- Oro (GLD)     0.000534 0.010267   -0.8653      10.1119           16.30       0.6680
-   S&P 500     0.000492 0.012384   -0.6722      15.6106           19.66       0.5000
+> print(tabla1_cuerpo, row.names = FALSE)
+  Activo Media_diaria Desv_Est Asimetria Curtosis Volat_anual_pct Sharpe_anual
+ Bitcoin     0.000311 0.037810   -1.1116  14.6833          60.02%       0.0876
+     Oro     0.000534 0.010267   -0.8653  10.1119          16.30%       0.6680
+ S&P 500            -        -         -        -               -       0.5000
+> 
+> write.csv(tabla1_completa, "salidas/tabla1_descriptivos_completa.csv", row.names = FALSE)
+> write.csv(tabla1_cuerpo, "salidas/tabla1_descriptivos_cuerpo.csv", row.names = FALSE)
 > 
 > # ------------------------------------------------------------------------------
-> # 5. TEST DE DICKEY-FULLER AUMENTADO — TABLA 2
+> # 5. TABLA 2 — TEST DE DICKEY-FULLER AUMENTADO
 > # ------------------------------------------------------------------------------
-> # H0: la serie tiene raíz unitaria (no estacionaria)
-> # Rechazo de H0 confirma estacionariedad
 > 
-> cat("\n--- TABLA 2: TEST ADF ---\n")
-
---- TABLA 2: TEST ADF ---
+> activos_adf <- c("BTC", "ORO", "SP500", "EURO", "NIKKEI")
+> nombres_adf <- c("Bitcoin", "Oro", "S&P 500", "Eurostoxx 50", "Nikkei 225")
 > 
-> activos_adf  <- c("BTC", "ORO", "SP500", "EURO", "NIKKEI")
-> nombres_adf  <- c("Bitcoin", "Oro (GLD)", "S&P 500", "Eurostoxx 50",
-+                   "Nikkei 225")
+> tabla2_adf <- data.frame()
 > 
-> tabla_adf <- data.frame()
-> for (i in 1:length(activos_adf)) {
-+   serie  <- as.numeric(datos[, activos_adf[i]])
-+   result <- adf.test(serie, alternative = "stationary")
-+   tabla_adf <- rbind(tabla_adf, data.frame(
-+     Activo     = nombres_adf[i],
-+     Estadistico_ADF = round(result$statistic, 3),
-+     P_valor    = ifelse(result$p.value < 0.01, "<0.01",
-+                         round(result$p.value, 4)),
-+     Resultado  = ifelse(result$p.value < 0.05,
-+                         "Estacionaria", "No estacionaria")
-+   ))
+> for (i in seq_along(activos_adf)) {
++   serie <- as.numeric(datos[, activos_adf[i]])
++   res_adf <- adf.test(serie, alternative = "stationary")
++   
++   tabla2_adf <- rbind(
++     tabla2_adf,
++     data.frame(
++       Activo = nombres_adf[i],
++       Estadistico_ADF = round(res_adf$statistic, 3),
++       P_valor = ifelse(res_adf$p.value < 0.01, "<0.01", round(res_adf$p.value, 4)),
++       Resultado = ifelse(res_adf$p.value < 0.05, "Estacionaria", "No estacionaria"),
++       stringsAsFactors = FALSE
++     )
++   )
 + }
 Avisos:
 1: In adf.test(serie, alternative = "stationary") :
@@ -191,56 +410,63 @@ Avisos:
   p-value smaller than printed p-value
 5: In adf.test(serie, alternative = "stationary") :
   p-value smaller than printed p-value
-> print(tabla_adf, row.names = FALSE)
+> 
+> cat("\n--- TABLA 2: TEST ADF ---\n")
+
+--- TABLA 2: TEST ADF ---
+> print(tabla2_adf, row.names = FALSE)
        Activo Estadistico_ADF P_valor    Resultado
       Bitcoin         -11.316    0.01 Estacionaria
-    Oro (GLD)         -12.246    0.01 Estacionaria
+          Oro         -12.246    0.01 Estacionaria
       S&P 500         -12.046    0.01 Estacionaria
  Eurostoxx 50         -12.195    0.01 Estacionaria
    Nikkei 225         -12.145    0.01 Estacionaria
 > 
+> write.csv(tabla2_adf, "salidas/tabla2_adf.csv", row.names = FALSE)
+> 
 > # ------------------------------------------------------------------------------
-> # 6. TESTS DE LJUNG-BOX Y ARCH-LM — TABLA 3
+> # 6. TABLA 3 — TESTS LJUNG-BOX Y ARCH-LM
 > # ------------------------------------------------------------------------------
-> # Ljung-Box sobre rendimientos al cuadrado: detecta volatility clustering
-> # ARCH-LM: confirma heterocedasticidad condicional
-> # Ambos justifican el uso del estimador Newey-West
+> 
+> tabla3_arch <- data.frame()
+> 
+> for (i in seq_along(activos_adf)) {
++   serie <- as.numeric(datos[, activos_adf[i]])
++   
++   lb_test  <- Box.test(serie^2, lag = 10, type = "Ljung-Box")
++   arch_lm  <- FinTS::ArchTest(serie, lags = 5)
++   
++   tabla3_arch <- rbind(
++     tabla3_arch,
++     data.frame(
++       Activo = nombres_adf[i],
++       Ljung_Box = round(lb_test$statistic, 2),
++       p_LB = ifelse(lb_test$p.value < 0.0001, "<0.0001", round(lb_test$p.value, 4)),
++       ARCH_LM = round(arch_lm$statistic, 2),
++       p_ARCH = ifelse(arch_lm$p.value < 0.0001, "<0.0001", round(arch_lm$p.value, 4)),
++       Heterocedasticidad = ifelse(arch_lm$p.value < 0.05, "Sí", "No"),
++       stringsAsFactors = FALSE
++     )
++   )
++ }
 > 
 > cat("\n--- TABLA 3: TESTS LJUNG-BOX Y ARCH-LM ---\n")
 
 --- TABLA 3: TESTS LJUNG-BOX Y ARCH-LM ---
+> print(tabla3_arch, row.names = FALSE)
+       Activo Ljung_Box    p_LB ARCH_LM  p_ARCH Heterocedasticidad
+      Bitcoin     39.29 <0.0001   33.11 <0.0001                 Sí
+          Oro    388.82 <0.0001  207.67 <0.0001                 Sí
+      S&P 500   2005.54 <0.0001  622.48 <0.0001                 Sí
+ Eurostoxx 50    757.53 <0.0001  346.32 <0.0001                 Sí
+   Nikkei 225    513.69 <0.0001  426.67 <0.0001                 Sí
 > 
-> tabla_arch <- data.frame()
-> for (i in 1:length(activos_adf)) {
-+   serie   <- as.numeric(datos[, activos_adf[i]])
-+   lb_test <- Box.test(serie^2, lag = 10, type = "Ljung-Box")
-+   arch_lm <- FinTS::ArchTest(serie, lags = 5)
-+   tabla_arch <- rbind(tabla_arch, data.frame(
-+     Activo    = nombres_adf[i],
-+     LB_Q      = round(lb_test$statistic, 2),
-+     LB_pvalor = ifelse(lb_test$p.value < 0.0001, "<0.0001",
-+                        round(lb_test$p.value, 4)),
-+     ARCH_LM   = round(arch_lm$statistic, 2),
-+     ARCH_pvalor = ifelse(arch_lm$p.value < 0.0001, "<0.0001",
-+                          round(arch_lm$p.value, 4)),
-+     Heterocedasticidad = ifelse(arch_lm$p.value < 0.05, "Sí", "No")
-+   ))
-+ }
-> print(tabla_arch, row.names = FALSE)
-       Activo    LB_Q LB_pvalor ARCH_LM ARCH_pvalor Heterocedasticidad
-      Bitcoin   39.29   <0.0001   33.11     <0.0001                 Sí
-    Oro (GLD)  388.82   <0.0001  207.67     <0.0001                 Sí
-      S&P 500 2005.54   <0.0001  622.48     <0.0001                 Sí
- Eurostoxx 50  757.53   <0.0001  346.32     <0.0001                 Sí
-   Nikkei 225  513.69   <0.0001  426.67     <0.0001                 Sí
+> write.csv(tabla3_arch, "salidas/tabla3_arch_ljungbox.csv", row.names = FALSE)
 > 
 > # ------------------------------------------------------------------------------
-> # 7. CORRELACIÓN MÓVIL — TABLA 4
+> # 7. TABLA 4 — CORRELACIONES POR SUBPERIODO Y CORRELACIÓN MÓVIL
 > # ------------------------------------------------------------------------------
-> # Coeficiente de Pearson en ventanas de 30, 60 y 120 días
-> # Calculado para cada activo (BTC, ORO) frente a cada índice
 > 
-> # Definición de fases temporales
 > fase1_inicio <- as.Date("2018-01-01")
 > fase1_fin    <- as.Date("2020-02-28")
 > fase2_inicio <- as.Date("2020-03-01")
@@ -258,350 +484,271 @@ Avisos:
 > nombres_act <- c("Bitcoin", "Oro")
 > nombres_idx <- c("S&P 500", "Eurostoxx 50", "Nikkei 225")
 > 
-> cat("\n--- TABLA 4: CORRELACIONES MEDIAS POR SUBPERIODO ---\n")
-
---- TABLA 4: CORRELACIONES MEDIAS POR SUBPERIODO ---
-> tabla_subperiodos <- data.frame()
+> tabla4_subperiodos <- data.frame()
 > 
-> for (a in 1:length(activos_cor)) {
-+   for (i in 1:length(indices_cor)) {
+> for (a in seq_along(activos_cor)) {
++   for (i in seq_along(indices_cor)) {
 +     serie_a <- as.numeric(datos[, activos_cor[a]])
 +     serie_i <- as.numeric(datos[, indices_cor[i]])
 +     
-+     tabla_subperiodos <- rbind(tabla_subperiodos, data.frame(
-+       Activo          = nombres_act[a],
-+       Indice          = nombres_idx[i],
-+       Fase1_PreCOVID  = round(cor(serie_a[f1], serie_i[f1]), 3),
-+       Fase2_Pandemia  = round(cor(serie_a[f2], serie_i[f2]), 3),
-+       Fase3_ETFs      = round(cor(serie_a[f3], serie_i[f3]), 3),
-+       Total_periodo   = round(cor(serie_a, serie_i), 3)
-+     ))
++     tabla4_subperiodos <- rbind(
++       tabla4_subperiodos,
++       data.frame(
++         Activo = nombres_act[a],
++         Indice = nombres_idx[i],
++         Fase1_PreCOVID = round(cor(serie_a[f1], serie_i[f1]), 3),
++         Fase2_Pandemia = round(cor(serie_a[f2], serie_i[f2]), 3),
++         Fase3_ETFs = round(cor(serie_a[f3], serie_i[f3]), 3),
++         Total = round(cor(serie_a, serie_i), 3),
++         stringsAsFactors = FALSE
++       )
++     )
 +   }
 + }
-> print(tabla_subperiodos, row.names = FALSE)
-  Activo       Indice Fase1_PreCOVID Fase2_Pandemia Fase3_ETFs Total_periodo
- Bitcoin      S&P 500          0.058          0.426      0.338         0.319
- Bitcoin Eurostoxx 50          0.037          0.338      0.103         0.214
- Bitcoin   Nikkei 225         -0.086          0.097     -0.002         0.022
-     Oro      S&P 500         -0.097          0.193      0.103         0.116
-     Oro Eurostoxx 50         -0.094          0.104      0.025         0.047
-     Oro   Nikkei 225         -0.040          0.068      0.076         0.058
 > 
-> # Correlaciones móviles a 30, 60 y 120 días (para gráficos)
-> calcular_cor_movil <- function(activo, indice, ventana) {
-+   rollapply(datos[, c(activo, indice)],
-+             width      = ventana,
-+             FUN        = function(x) cor(x[, 1], x[, 2]),
-+             by.column  = FALSE,
-+             align      = "right")
-+ }
+> cat("\n--- TABLA 4: CORRELACIONES POR SUBPERIODO ---\n")
+
+--- TABLA 4: CORRELACIONES POR SUBPERIODO ---
+> print(tabla4_subperiodos, row.names = FALSE)
+  Activo       Indice Fase1_PreCOVID Fase2_Pandemia Fase3_ETFs Total
+ Bitcoin      S&P 500          0.058          0.426      0.338 0.319
+ Bitcoin Eurostoxx 50          0.037          0.338      0.103 0.214
+ Bitcoin   Nikkei 225         -0.086          0.097     -0.002 0.022
+     Oro      S&P 500         -0.097          0.193      0.103 0.116
+     Oro Eurostoxx 50         -0.094          0.104      0.025 0.047
+     Oro   Nikkei 225         -0.040          0.068      0.076 0.058
 > 
-> cor_btc_sp_60  <- calcular_cor_movil("BTC", "SP500",  60)
-> cor_btc_sp_30  <- calcular_cor_movil("BTC", "SP500",  30)
-> cor_btc_sp_120 <- calcular_cor_movil("BTC", "SP500", 120)
-> cor_oro_sp_60  <- calcular_cor_movil("ORO", "SP500",  60)
+> write.csv(tabla4_subperiodos, "salidas/tabla4_correlaciones_subperiodo.csv", row.names = FALSE)
 > 
-> cor_btc_eu_60  <- calcular_cor_movil("BTC", "EURO",   60)
-> cor_btc_eu_30  <- calcular_cor_movil("BTC", "EURO",   30)
-> cor_btc_eu_120 <- calcular_cor_movil("BTC", "EURO",  120)
-> cor_oro_eu_60  <- calcular_cor_movil("ORO", "EURO",   60)
+> # Correlaciones móviles para las figuras
+> cor_btc_sp_30  <- calcular_cor_movil("BTC", "SP500", 30, datos)
+> cor_btc_sp_60  <- calcular_cor_movil("BTC", "SP500", 60, datos)
+> cor_btc_sp_120 <- calcular_cor_movil("BTC", "SP500", 120, datos)
+> cor_oro_sp_60  <- calcular_cor_movil("ORO", "SP500", 60, datos)
 > 
-> cor_btc_nk_60  <- calcular_cor_movil("BTC", "NIKKEI", 60)
-> cor_btc_nk_30  <- calcular_cor_movil("BTC", "NIKKEI", 30)
-> cor_btc_nk_120 <- calcular_cor_movil("BTC", "NIKKEI",120)
-> cor_oro_nk_60  <- calcular_cor_movil("ORO", "NIKKEI", 60)
+> cor_btc_eu_30  <- calcular_cor_movil("BTC", "EURO", 30, datos)
+> cor_btc_eu_60  <- calcular_cor_movil("BTC", "EURO", 60, datos)
+> cor_btc_eu_120 <- calcular_cor_movil("BTC", "EURO", 120, datos)
+> cor_oro_eu_60  <- calcular_cor_movil("ORO", "EURO", 60, datos)
+> 
+> cor_btc_nk_30  <- calcular_cor_movil("BTC", "NIKKEI", 30, datos)
+> cor_btc_nk_60  <- calcular_cor_movil("BTC", "NIKKEI", 60, datos)
+> cor_btc_nk_120 <- calcular_cor_movil("BTC", "NIKKEI", 120, datos)
+> cor_oro_nk_60  <- calcular_cor_movil("ORO", "NIKKEI", 60, datos)
 > 
 > # ------------------------------------------------------------------------------
-> # 8. MODELO CON DUMMIES — TABLAS 5a, 5b Y 6
+> # 8. TABLA 5 — MODELO PRINCIPAL CON DUMMIES (PERIODO COMPLETO)
 > # ------------------------------------------------------------------------------
-> # Modelo: r_{i,t} = β0 + β1·r_{m,t} + β2·(Dt·r_{m,t}) + ε_t
-> # Dt = 1 si r_{m,t} <= percentil umbral (crisis), 0 en caso contrario
-> # Errores estándar Newey-West | p-valor β2 unilateral (H1: β2 > 0)
 > 
-> estimar_dummy <- function(activo, indice, umbral_pct,
-+                           nombre_activo, nombre_indice,
-+                           datos_uso = datos) {
-+   
-+   r_a <- as.numeric(datos_uso[, activo])
-+   r_i <- as.numeric(datos_uso[, indice])
-+   n   <- length(r_a)
-+   
-+   umbral <- quantile(r_i, probs = umbral_pct, na.rm = TRUE)
-+   Dt     <- as.numeric(r_i <= umbral)
-+   inter  <- Dt * r_i
-+   
-+   mod    <- lm(r_a ~ r_i + inter)
-+   lag_nw <- max(floor(4 * (n / 100)^(2/9)), 1)
-+   vcov_nw <- tryCatch(
-+     sandwich::NeweyWest(mod, lag = lag_nw, prewhite = FALSE),
-+     error = function(e) vcov(mod)
-+   )
-+   
-+   b0 <- coef(mod)[1]; b1 <- coef(mod)[2]; b2 <- coef(mod)[3]
-+   se0 <- sqrt(vcov_nw[1,1])
-+   se1 <- sqrt(vcov_nw[2,2])
-+   se2 <- sqrt(vcov_nw[3,3])
-+   t2  <- b2 / se2
-+   
-+   pval_b0 <- 2 * pt(abs(b0/se0), df = n-3, lower.tail = FALSE)
-+   pval_b1 <- 2 * pt(abs(b1/se1), df = n-3, lower.tail = FALSE)
-+   pval_b2_bil <- 2 * pt(abs(t2), df = n-3, lower.tail = FALSE)
-+   pval_b2_uni <- ifelse(b2 > 0, pval_b2_bil / 2, 1 - pval_b2_bil / 2)
-+   
-+   clasificacion <- dplyr::case_when(
-+     b2 < 0 & pval_b2_uni < 0.05  ~ "Refugio fuerte",
-+     b2 < 0 & pval_b2_uni >= 0.05 ~ "Refugio débil",
-+     b2 > 0 & pval_b2_uni < 0.05  ~ "Procíclico",
-+     b2 > 0 & pval_b2_uni >= 0.05 ~ "Sin evidencia",
-+     TRUE ~ "Refugio débil"
-+   )
-+   
-+   sig <- dplyr::case_when(
-+     pval_b2_uni < 0.01 ~ "***",
-+     pval_b2_uni < 0.05 ~ "**",
-+     pval_b2_uni < 0.10 ~ "*",
-+     TRUE               ~ "n.s."
-+   )
-+   
-+   data.frame(
-+     Activo        = nombre_activo,
-+     Indice        = nombre_indice,
-+     Umbral        = paste0(umbral_pct * 100, "%"),
-+     N_crisis      = sum(Dt),
-+     Beta0         = round(b0, 6),
-+     Beta1         = round(b1, 4),
-+     p_beta1       = round(pval_b0, 4),
-+     Beta2         = round(b2, 4),
-+     p_beta2_uni   = round(pval_b2_uni, 4),
-+     Sig           = sig,
-+     Clasificacion = clasificacion,
-+     stringsAsFactors = FALSE
-+   )
-+ }
-> 
-> # Estimación de 18 modelos: 2 activos × 3 índices × 3 umbrales
-> activos  <- c("BTC", "ORO")
-> indices  <- c("SP500", "EURO", "NIKKEI")
+> activos <- c("BTC", "ORO")
+> indices <- c("SP500", "EURO", "NIKKEI")
 > umbrales <- c(0.01, 0.05, 0.10)
+> 
 > nomb_act <- c("Bitcoin", "Oro")
 > nomb_idx <- c("S&P 500", "Eurostoxx 50", "Nikkei 225")
 > 
 > resultados_principal <- list()
+> 
 > for (a in 1:2) {
 +   for (i in 1:3) {
 +     for (u in 1:3) {
-+       clave <- paste0(activos[a], "_", indices[i], "_p", umbrales[u]*100)
++       clave <- paste0(activos[a], "_", indices[i], "_p", umbrales[u] * 100)
 +       resultados_principal[[clave]] <- estimar_dummy(
-+         activos[a], indices[i], umbrales[u], nomb_act[a], nomb_idx[i]
++         activo = activos[a],
++         indice = indices[i],
++         umbral_pct = umbrales[u],
++         nombre_activo = nomb_act[a],
++         nombre_indice = nomb_idx[i],
++         datos_uso = datos
 +       )
 +     }
 +   }
 + }
 > 
-> tabla_principal <- do.call(rbind, resultados_principal)
+> tabla5_tecnica <- do.call(rbind, resultados_principal)
 > 
-> cat("\n--- TABLAS 5a y 5b: MODELO CON DUMMIES PERÍODO COMPLETO ---\n")
-
---- TABLAS 5a y 5b: MODELO CON DUMMIES PERÍODO COMPLETO ---
-> cat("Bitcoin:\n")
-Bitcoin:
-> print(tabla_principal[tabla_principal$Activo == "Bitcoin",
-+                       c("Indice","Umbral","N_crisis","Beta0","Beta1",
-+                         "Beta2","p_beta2_uni","Sig","Clasificacion")],
-+       row.names = FALSE)
-       Indice Umbral N_crisis    Beta0   Beta1  Beta2 p_beta2_uni  Sig Clasificacion
-      S&P 500     1%       19 0.000069  0.8908 0.3597      0.1588 n.s. Sin evidencia
-      S&P 500     5%       94 0.000410  0.8409 0.3382      0.0858    * Sin evidencia
-      S&P 500    10%      187 0.000383  0.8700 0.2217      0.1758 n.s. Sin evidencia
- Eurostoxx 50     1%       19 0.000596  0.4859 0.8397      0.0604    * Sin evidencia
- Eurostoxx 50     5%       94 0.000734  0.5177 0.3971      0.1797 n.s. Sin evidencia
- Eurostoxx 50    10%      187 0.000847  0.5246 0.3185      0.2115 n.s. Sin evidencia
-   Nikkei 225     1%       19 0.000505 -0.0048 0.3648      0.1113 n.s. Sin evidencia
-   Nikkei 225     5%       94 0.000981 -0.0751 0.4175      0.0193   **    Procíclico
-   Nikkei 225    10%      187 0.001057 -0.0628 0.3024      0.0512    * Sin evidencia
-> cat("\nOro:\n")
-
-Oro:
-> print(tabla_principal[tabla_principal$Activo == "Oro",
-+                       c("Indice","Umbral","N_crisis","Beta0","Beta1",
-+                         "Beta2","p_beta2_uni","Sig","Clasificacion")],
-+       row.names = FALSE)
-       Indice Umbral N_crisis    Beta0   Beta1   Beta2 p_beta2_uni  Sig Clasificacion
-      S&P 500     1%       19 0.000532  0.0804  0.0681      0.1332 n.s. Sin evidencia
-      S&P 500     5%       94 0.000466  0.1009 -0.0123      0.5685 n.s. Refugio débil
-      S&P 500    10%      187 0.000438  0.1053 -0.0197      0.6061 n.s. Refugio débil
- Eurostoxx 50     1%       19 0.000625  0.0009  0.1745      0.0039  ***    Procíclico
- Eurostoxx 50     5%       94 0.000694 -0.0021  0.1070      0.0474   **    Procíclico
- Eurostoxx 50    10%      187 0.000731 -0.0018  0.0890      0.1011 n.s. Sin evidencia
-   Nikkei 225     1%       19 0.000564  0.0300  0.0793      0.1275 n.s. Sin evidencia
-   Nikkei 225     5%       94 0.000599  0.0281  0.0498      0.1926 n.s. Sin evidencia
-   Nikkei 225    10%      187 0.000602  0.0305  0.0338      0.2799 n.s. Sin evidencia
+> tabla5_cuerpo <- tabla5_tecnica %>%
++   transmute(
++     Activo,
++     Indice,
++     Umbral,
++     N_crisis,
++     Beta_normal = round(Beta1, 4),
++     p_Beta_normal = fmt_p(p_Beta1_bi),
++     Beta_crisis = round(Beta_crisis, 4),
++     p_Beta_crisis = fmt_p(p_Beta_crisis_bi),
++     Clasificacion
++   )
 > 
-> # Tabla 6 — síntesis por intensidad
-> cat("\n--- TABLA 6: SÍNTESIS β2 POR INTENSIDAD DE CRISIS ---\n")
+> cat("\n--- TABLA 5: MODELO PRINCIPAL (PERIODO COMPLETO) ---\n")
 
---- TABLA 6: SÍNTESIS β2 POR INTENSIDAD DE CRISIS ---
-> tabla6 <- tabla_principal %>%
-+   select(Activo, Indice, Umbral, Beta2, Sig) %>%
-+   tidyr::pivot_wider(names_from  = Umbral,
-+                      values_from = c(Beta2, Sig))
-> print(tabla6, row.names = FALSE)
-# A tibble: 6 × 8
-  Activo  Indice       `Beta2_1%` `Beta2_5%` `Beta2_10%` `Sig_1%` `Sig_5%` `Sig_10%`
-  <chr>   <chr>             <dbl>      <dbl>       <dbl> <chr>    <chr>    <chr>    
-1 Bitcoin S&P 500          0.360      0.338       0.222  n.s.     *        n.s.     
-2 Bitcoin Eurostoxx 50     0.840      0.397       0.318  *        n.s.     n.s.     
-3 Bitcoin Nikkei 225       0.365      0.418       0.302  n.s.     **       *        
-4 Oro     S&P 500          0.0681    -0.0123     -0.0197 n.s.     n.s.     n.s.     
-5 Oro     Eurostoxx 50     0.174      0.107       0.089  ***      **       n.s.     
-6 Oro     Nikkei 225       0.0793     0.0498      0.0338 n.s.     n.s.     n.s.     
+--- TABLA 5: MODELO PRINCIPAL (PERIODO COMPLETO) ---
+> print(tabla5_cuerpo, row.names = FALSE)
+  Activo       Indice Umbral N_crisis Beta_normal p_Beta_normal Beta_crisis p_Beta_crisis Clasificacion
+ Bitcoin      S&P 500     1%       19      0.8908       <0.0001      1.2505        0.0004    Procíclico
+ Bitcoin      S&P 500     5%       94      0.8409       <0.0001      1.1790       <0.0001    Procíclico
+ Bitcoin      S&P 500    10%      187      0.8700       <0.0001      1.0917       <0.0001    Procíclico
+ Bitcoin Eurostoxx 50     1%       19      0.4859       <0.0001      1.3256        0.0154    Procíclico
+ Bitcoin Eurostoxx 50     5%       94      0.5177       <0.0001      0.9148        0.0327    Procíclico
+ Bitcoin Eurostoxx 50    10%      187      0.5246       <0.0001      0.8430        0.0286    Procíclico
+ Bitcoin   Nikkei 225     1%       19     -0.0048        0.9503      0.3600        0.2260 Sin evidencia
+ Bitcoin   Nikkei 225     5%       94     -0.0751        0.3202      0.3424        0.0833 Sin evidencia
+ Bitcoin   Nikkei 225    10%      187     -0.0628        0.4418      0.2396        0.1682 Sin evidencia
+     Oro      S&P 500     1%       19      0.0804        0.0301      0.1485        0.0003    Procíclico
+     Oro      S&P 500     5%       94      0.1009        0.0268      0.0886        0.0295    Procíclico
+     Oro      S&P 500    10%      187      0.1053        0.0388      0.0856        0.0228    Procíclico
+     Oro Eurostoxx 50     1%       19      0.0009        0.9791      0.1754        0.0034    Procíclico
+     Oro Eurostoxx 50     5%       94     -0.0021        0.9623      0.1049        0.0282    Procíclico
+     Oro Eurostoxx 50    10%      187     -0.0018        0.9726      0.0872        0.0646 Sin evidencia
+     Oro   Nikkei 225     1%       19      0.0300        0.2552      0.1093        0.0963 Sin evidencia
+     Oro   Nikkei 225     5%       94      0.0281        0.3701      0.0779        0.0920 Sin evidencia
+     Oro   Nikkei 225    10%      187      0.0305        0.3915      0.0643        0.1230 Sin evidencia
+> 
+> write.csv(tabla5_tecnica, "salidas/tabla5_modelo_principal_tecnica.csv", row.names = FALSE)
+> write.csv(tabla5_cuerpo, "salidas/tabla5_modelo_principal_cuerpo.csv", row.names = FALSE)
 > 
 > # ------------------------------------------------------------------------------
-> # 9. ANÁLISIS DE ROBUSTEZ CON VIX — TABLA 7
+> # 9. TABLA 6 — ROBUSTEZ CON DUMMY VIX
 > # ------------------------------------------------------------------------------
-> # Dt_VIX = 1 cuando VIX >= percentil 95 de su distribución histórica
-> # Solo se estima frente al S&P 500
 > 
-> cat("\n--- TABLA 7: ROBUSTEZ CON DUMMY VIX (percentil 95) ---\n")
+> vix_serie <- as.numeric(datos[, "VIX"])
+> vix_p95 <- as.numeric(quantile(vix_serie, probs = 0.95, na.rm = TRUE))
+> 
+> datos_vix <- cbind(datos, DUMMY_VIX = as.numeric(vix_serie >= vix_p95))
+> 
+> cat("\nUmbral VIX p95:", round(vix_p95, 2), "\n")
 
---- TABLA 7: ROBUSTEZ CON DUMMY VIX (percentil 95) ---
-> 
-> vix_serie  <- as.numeric(datos[, "VIX"])
-> vix_p95    <- quantile(vix_serie, probs = 0.95, na.rm = TRUE)
-> Dt_VIX     <- as.numeric(vix_serie >= vix_p95)
-> 
-> cat("Umbral VIX p95:", round(vix_p95, 2), "\n")
 Umbral VIX p95: 31.96 
-> cat("Días de pánico extremo:", sum(Dt_VIX), "\n")
-Días de pánico extremo: 94 
+> cat("Días con VIX extremo:", sum(as.numeric(datos_vix[, "DUMMY_VIX"])), "\n")
+Días con VIX extremo: 94 
 > 
-> estimar_vix <- function(activo, nombre_activo) {
-+   r_a   <- as.numeric(datos[, activo])
-+   r_sp  <- as.numeric(datos[, "SP500"])
-+   n     <- length(r_a)
-+   inter <- Dt_VIX * r_sp
-+   
-+   mod    <- lm(r_a ~ r_sp + inter)
-+   lag_nw <- floor(4 * (n / 100)^(2/9))
-+   vcov_nw <- sandwich::NeweyWest(mod, lag = lag_nw, prewhite = FALSE)
-+   
-+   b1  <- coef(mod)[2]; b2 <- coef(mod)[3]
-+   se1 <- sqrt(vcov_nw[2,2]); se2 <- sqrt(vcov_nw[3,3])
-+   t2  <- b2 / se2
-+   
-+   pval_b1     <- 2 * pt(abs(b1/se1), df = n-3, lower.tail = FALSE)
-+   pval_b2_bil <- 2 * pt(abs(t2), df = n-3, lower.tail = FALSE)
-+   pval_b2_uni <- ifelse(b2 > 0, pval_b2_bil / 2, 1 - pval_b2_bil / 2)
-+   
-+   sig <- dplyr::case_when(
-+     pval_b2_uni < 0.01 ~ "***",
-+     pval_b2_uni < 0.05 ~ "**",
-+     pval_b2_uni < 0.10 ~ "*",
-+     TRUE               ~ "n.s."
-+   )
-+   
-+   clasificacion <- dplyr::case_when(
-+     b2 < 0 & pval_b2_uni < 0.05  ~ "Refugio fuerte",
-+     b2 < 0 & pval_b2_uni >= 0.05 ~ "Refugio débil",
-+     b2 > 0 & pval_b2_uni < 0.05  ~ "Procíclico",
-+     TRUE                          ~ "Sin evidencia"
-+   )
-+   
-+   cat("\n---", nombre_activo, "---\n")
-+   cat(sprintf("  β1 = %.4f (p = %.4f)\n", b1, pval_b1))
-+   cat(sprintf("  β2 = %.4f (p_uni = %.4f) %s — %s\n",
-+               b2, pval_b2_uni, sig, clasificacion))
-+ }
+> tabla6_tecnica <- rbind(
++   estimar_vix("BTC", "Bitcoin", datos_vix),
++   estimar_vix("ORO", "Oro", datos_vix)
++ )
 > 
-> estimar_vix("BTC", "Bitcoin")
+> tabla6_cuerpo <- tabla6_tecnica %>%
++   transmute(
++     Activo,
++     Beta_normal = round(Beta1, 4),
++     p_Beta_normal = fmt_p(p_Beta1_bi),
++     Beta_crisis = round(Beta_crisis, 4),
++     p_Beta_crisis = fmt_p(p_Beta_crisis_bi),
++     Clasificacion
++   )
+> 
+> cat("\n--- TABLA 6: ROBUSTEZ CON DUMMY VIX (95%) ---\n")
 
---- Bitcoin ---
-  β1 = 0.9221 (p = 0.0000)
-  β2 = 0.1173 (p_uni = 0.3189) n.s. — Sin evidencia
-> estimar_vix("ORO", "Oro")
-
---- Oro ---
-  β1 = 0.0837 (p = 0.0084)
-  β2 = 0.0282 (p_uni = 0.3020) n.s. — Sin evidencia
+--- TABLA 6: ROBUSTEZ CON DUMMY VIX (95%) ---
+> print(tabla6_cuerpo, row.names = FALSE)
+  Activo Beta_normal p_Beta_normal Beta_crisis p_Beta_crisis Clasificacion
+ Bitcoin      0.9221       <0.0001      1.0394       <0.0001    Procíclico
+     Oro      0.0837        0.0084      0.1119        0.0127    Procíclico
+> 
+> write.csv(tabla6_tecnica, "salidas/tabla6_robustez_vix_tecnica.csv", row.names = FALSE)
+> write.csv(tabla6_cuerpo, "salidas/tabla6_robustez_vix_cuerpo.csv", row.names = FALSE)
 > 
 > # ------------------------------------------------------------------------------
-> # 10. ANÁLISIS POR SUBPERIODOS — TABLAS 8a Y 8b
+> # 10. TABLAS 7a Y 7b — ANÁLISIS POR SUBPERIODOS
 > # ------------------------------------------------------------------------------
-> # Replica el modelo con dummies para cada fase temporal
-> # Los percentiles se calculan DENTRO de cada subperiodo
 > 
 > fases <- list(
-+   list(nombre = "1. Pre-COVID",  inicio = fase1_inicio, fin = fase1_fin),
-+   list(nombre = "2. Pandemia",   inicio = fase2_inicio, fin = fase2_fin),
-+   list(nombre = "3. ETFs",       inicio = fase3_inicio, fin = fase3_fin)
++   list(nombre = "1. Pre-COVID", inicio = fase1_inicio, fin = fase1_fin),
++   list(nombre = "2. Pandemia",  inicio = fase2_inicio, fin = fase2_fin),
++   list(nombre = "3. ETFs",      inicio = fase3_inicio, fin = fase3_fin)
 + )
 > 
 > resultados_sub <- list()
 > 
 > for (fase in fases) {
-+   rango     <- paste0(as.character(fase$inicio), "/",
-+                       as.character(fase$fin))
++   rango <- paste0(as.character(fase$inicio), "/", as.character(fase$fin))
 +   datos_sub <- na.omit(datos[rango])
 +   
 +   for (a in 1:2) {
 +     for (i in 1:3) {
 +       res <- estimar_dummy(
-+         activo        = activos[a],
-+         indice        = indices[i],
-+         umbral_pct    = 0.05,
++         activo = activos[a],
++         indice = indices[i],
++         umbral_pct = 0.05,
 +         nombre_activo = nomb_act[a],
 +         nombre_indice = nomb_idx[i],
-+         datos_uso     = datos_sub
++         datos_uso = datos_sub
 +       )
++       
 +       res$Fase <- fase$nombre
++       res$Obs_subperiodo <- nrow(datos_sub)
++       
 +       clave <- paste0(fase$nombre, "_", activos[a], "_", indices[i])
 +       resultados_sub[[clave]] <- res
 +     }
 +   }
++   
 +   cat("✓ Completada:", fase$nombre, "\n")
 + }
 ✓ Completada: 1. Pre-COVID 
 ✓ Completada: 2. Pandemia 
 ✓ Completada: 3. ETFs 
 > 
-> tabla_sub <- do.call(rbind, resultados_sub)
+> tabla7_tecnica <- do.call(rbind, resultados_sub)
 > 
-> cat("\n--- TABLA 8a: BITCOIN POR FASES (umbral 5%) ---\n")
-
---- TABLA 8a: BITCOIN POR FASES (umbral 5%) ---
-> tabla8a <- tabla_sub %>%
+> tabla7a_bitcoin <- tabla7_tecnica %>%
 +   filter(Activo == "Bitcoin") %>%
-+   select(Fase, Indice, Beta1, Beta2, p_beta2_uni, Sig, Clasificacion)
-> print(tabla8a, row.names = FALSE)
-         Fase       Indice   Beta1   Beta2 p_beta2_uni  Sig Clasificacion
- 1. Pre-COVID      S&P 500  0.2288  0.0763      0.4421 n.s. Sin evidencia
- 1. Pre-COVID Eurostoxx 50  0.4082 -0.6527      0.8570 n.s. Refugio débil
- 1. Pre-COVID   Nikkei 225 -0.3843  0.1328      0.3554 n.s. Sin evidencia
-  2. Pandemia      S&P 500  0.9690  0.4247      0.0962    * Sin evidencia
-  2. Pandemia Eurostoxx 50  0.5894  0.8506      0.0406   **    Procíclico
-  2. Pandemia   Nikkei 225  0.0891  0.7952      0.0353   **    Procíclico
-      3. ETFs      S&P 500  1.0163 -0.1095      0.6123 n.s. Refugio débil
-      3. ETFs Eurostoxx 50  0.4126 -0.3346      0.8470 n.s. Refugio débil
-      3. ETFs   Nikkei 225 -0.0955  0.2574      0.1173 n.s. Sin evidencia
++   transmute(
++     Fase,
++     Indice,
++     Beta_normal = round(Beta1, 4),
++     p_Beta_normal = fmt_p(p_Beta1_bi),
++     Beta_crisis = round(Beta_crisis, 4),
++     p_Beta_crisis = fmt_p(p_Beta_crisis_bi),
++     Clasificacion
++   )
 > 
-> cat("\n--- TABLA 8b: ORO POR FASES (umbral 5%) ---\n")
-
---- TABLA 8b: ORO POR FASES (umbral 5%) ---
-> tabla8b <- tabla_sub %>%
+> tabla7b_oro <- tabla7_tecnica %>%
 +   filter(Activo == "Oro") %>%
-+   select(Fase, Indice, Beta1, Beta2, p_beta2_uni, Sig, Clasificacion)
-> print(tabla8b, row.names = FALSE)
-         Fase       Indice   Beta1   Beta2 p_beta2_uni  Sig Clasificacion
- 1. Pre-COVID      S&P 500 -0.0252 -0.1079      0.8860 n.s. Refugio débil
- 1. Pre-COVID Eurostoxx 50 -0.1130  0.1092      0.2306 n.s. Sin evidencia
- 1. Pre-COVID   Nikkei 225 -0.0468  0.0576      0.3249 n.s. Sin evidencia
-  2. Pandemia      S&P 500  0.1234 -0.0014      0.5059 n.s. Refugio débil
-  2. Pandemia Eurostoxx 50  0.0336  0.0859      0.1682 n.s. Sin evidencia
-  2. Pandemia   Nikkei 225  0.0192  0.1180      0.1591 n.s. Sin evidencia
-      3. ETFs      S&P 500  0.1244  0.0115      0.4671 n.s. Sin evidencia
-      3. ETFs Eurostoxx 50  0.0555 -0.0727      0.7152 n.s. Refugio débil
-      3. ETFs   Nikkei 225  0.0659 -0.0120      0.5624 n.s. Refugio débil
++   transmute(
++     Fase,
++     Indice,
++     Beta_normal = round(Beta1, 4),
++     p_Beta_normal = fmt_p(p_Beta1_bi),
++     Beta_crisis = round(Beta_crisis, 4),
++     p_Beta_crisis = fmt_p(p_Beta_crisis_bi),
++     Clasificacion
++   )
 > 
-> cat("\n✓ ANÁLISIS FINALIZADO\n")
+> cat("\n--- TABLA 7a: BITCOIN POR FASES (5%) ---\n")
 
-✓ ANÁLISIS FINALIZADO
+--- TABLA 7a: BITCOIN POR FASES (5%) ---
+> print(tabla7a_bitcoin, row.names = FALSE)
+         Fase       Indice Beta_normal p_Beta_normal Beta_crisis p_Beta_crisis Clasificacion
+ 1. Pre-COVID      S&P 500      0.2288        0.5090      0.3051        0.4973 Sin evidencia
+ 1. Pre-COVID Eurostoxx 50      0.4082        0.1842     -0.2445        0.5855 Refugio débil
+ 1. Pre-COVID   Nikkei 225     -0.3843        0.0712     -0.2516        0.3676 Refugio débil
+  2. Pandemia      S&P 500      0.9690       <0.0001      1.3937       <0.0001    Procíclico
+  2. Pandemia Eurostoxx 50      0.5894       <0.0001      1.4400        0.0028    Procíclico
+  2. Pandemia   Nikkei 225      0.0891        0.4886      0.8844        0.0351    Procíclico
+      3. ETFs      S&P 500      1.0163       <0.0001      0.9068        0.0102    Procíclico
+      3. ETFs Eurostoxx 50      0.4126        0.0098      0.0781        0.8000 Sin evidencia
+      3. ETFs   Nikkei 225     -0.0955        0.3292      0.1619        0.4923 Sin evidencia
+> 
+> cat("\n--- TABLA 7b: ORO POR FASES (5%) ---\n")
+
+--- TABLA 7b: ORO POR FASES (5%) ---
+> print(tabla7b_oro, row.names = FALSE)
+         Fase       Indice Beta_normal p_Beta_normal Beta_crisis p_Beta_crisis Clasificacion
+ 1. Pre-COVID      S&P 500     -0.0252        0.6231     -0.1330        0.0664 Refugio débil
+ 1. Pre-COVID Eurostoxx 50     -0.1130        0.0212     -0.0038        0.9778 Refugio débil
+ 1. Pre-COVID   Nikkei 225     -0.0468        0.2567      0.0108        0.9257 Sin evidencia
+  2. Pandemia      S&P 500      0.1234        0.0453      0.1221        0.0125    Procíclico
+  2. Pandemia Eurostoxx 50      0.0336        0.6159      0.1194        0.0466    Procíclico
+  2. Pandemia   Nikkei 225      0.0192        0.6838      0.1372        0.2006 Sin evidencia
+      3. ETFs      S&P 500      0.1244        0.1344      0.1359        0.1858 Sin evidencia
+      3. ETFs Eurostoxx 50      0.0555        0.4419     -0.0172        0.8735 Refugio débil
+      3. ETFs   Nikkei 225      0.0659        0.2343      0.0539        0.1842 Sin evidencia
+> 
+> write.csv(tabla7_tecnica, "salidas/tabla7_subperiodos_tecnica.csv", row.names = FALSE)
+> write.csv(tabla7a_bitcoin, "salidas/tabla7a_bitcoin_subperiodos.csv", row.names = FALSE)
+> write.csv(tabla7b_oro, "salidas/tabla7b_oro_subperiodos.csv", row.names = FALSE)
+> 
+> cat("\n✓ ANÁLISIS NUMÉRICO FINALIZADO\n")
+
+✓ ANÁLISIS NUMÉRICO FINALIZADO
